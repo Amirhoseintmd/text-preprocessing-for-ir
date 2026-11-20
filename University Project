@@ -1,0 +1,239 @@
+import json
+import re
+import sys
+
+STOP_WORDS = {
+    "a", "an", "the", "and", "or", "but", "if", "of", "to", "in", "on", "at",
+    "by", "for", "with", "about", "as", "into", "from", "up", "out", "over",
+    "is", "are", "was", "were", "be", "been", "being", "am",
+    "have", "has", "had", "do", "does", "did",
+    "i", "me", "my", "we", "our", "you", "your", "he", "him", "his",
+    "she", "her", "it", "its", "they", "them", "their",
+    "this", "that", "these", "those", "so", "than", "too", "very", "not", "no",
+}
+
+
+TOKEN_PATTERN = re.compile(
+    r"(?:[A-Za-z]\.){2,}"
+    r"|[A-Za-z]+(?:-[A-Za-z]+)+"
+    r"|[A-Za-z]+(?:['\u2019][A-Za-z]+)?"
+    r"|\d+"
+)
+
+
+
+def tokenize(text):
+    tokens = []
+    for t in TOKEN_PATTERN.findall(text):
+        if t.endswith("'s") or t.endswith("\u2019s"):  
+            t = t[:-2]
+        tokens.append(t)
+    return tokens
+
+
+
+def normalize(token):
+    t = token.lower()
+    if re.fullmatch(r"(?:[a-z]\.)+", t):  
+        t = t.replace(".", "")
+    return t
+
+
+
+def _is_cons(w, i):
+    c = w[i]
+    if c in "aeiou":
+        return False
+    if c == "y":
+        return i == 0 or not _is_cons(w, i - 1)
+    return True
+
+
+def _measure(s):
+    n, i, length = 0, 0, len(s)
+    while i < length and _is_cons(s, i):
+        i += 1
+    while i < length:
+        while i < length and not _is_cons(s, i):
+            i += 1
+        if i >= length:
+            break
+        while i < length and _is_cons(s, i):
+            i += 1
+        n += 1
+    return n
+
+
+def _has_vowel(s):
+    return any(not _is_cons(s, i) for i in range(len(s)))
+
+
+def _ends_double_cons(s):
+    return len(s) >= 2 and s[-1] == s[-2] and _is_cons(s, len(s) - 1)
+
+
+def _cvc(s):
+    n = len(s)
+    if n < 3:
+        return False
+    if not _is_cons(s, n - 3) or _is_cons(s, n - 2) or not _is_cons(s, n - 1):
+        return False
+    return s[-1] not in "wxy"
+
+
+STEP2 = [
+    ("ational", "ate"), ("tional", "tion"), ("enci", "ence"), ("anci", "ance"),
+    ("izer", "ize"), ("bli", "ble"), ("alli", "al"), ("entli", "ent"),
+    ("eli", "e"), ("ousli", "ous"), ("ization", "ize"), ("ation", "ate"),
+    ("ator", "ate"), ("alism", "al"), ("iveness", "ive"), ("fulness", "ful"),
+    ("ousness", "ous"), ("aliti", "al"), ("iviti", "ive"), ("biliti", "ble"),
+    ("logi", "log"),
+]
+STEP3 = [
+    ("icate", "ic"), ("ative", ""), ("alize", "al"), ("iciti", "ic"),
+    ("ical", "ic"), ("ful", ""), ("ness", ""),
+]
+STEP4 = [
+    "al", "ance", "ence", "er", "ic", "able", "ible", "ant", "ement", "ment",
+    "ent", "ion", "ou", "ism", "ate", "iti", "ous", "ive", "ize",
+]
+
+
+def _replace_first_match(w, rules):
+    for suffix, repl in rules:
+        if w.endswith(suffix):
+            stem = w[: -len(suffix)]
+            return stem + repl if _measure(stem) > 0 else w
+    return w
+
+
+def stem(w):
+    if len(w) <= 2:
+        return w
+
+    
+    if w.endswith("sses"):
+        w = w[:-2]
+    elif w.endswith("ies"):
+        w = w[:-2]
+    elif w.endswith("ss"):
+        pass
+    elif w.endswith("s"):
+        w = w[:-1]
+
+    
+    extra = False
+    if w.endswith("eed"):
+        if _measure(w[:-3]) > 0:
+            w = w[:-1]
+    elif w.endswith("ed") and _has_vowel(w[:-2]):
+        w = w[:-2]
+        extra = True
+    
+
+    elif w.endswith("ing") and _has_vowel(w[:-3]):
+        w = w[:-3]
+        extra = True
+    if extra:
+        if w.endswith(("at", "bl", "iz")):
+            w += "e"
+        elif _ends_double_cons(w) and w[-1] not in "lsz":
+            w = w[:-1]
+        elif _measure(w) == 1 and _cvc(w):
+            w += "e"
+
+    
+    if w.endswith("y") and _has_vowel(w[:-1]):
+        w = w[:-1] + "i"
+
+    
+    w = _replace_first_match(w, STEP2)
+    w = _replace_first_match(w, STEP3)
+
+    
+    for suffix in STEP4:
+        if w.endswith(suffix):
+            s = w[: -len(suffix)]
+            ok = _measure(s) > 1
+            if suffix == "ion":
+                ok = ok and s.endswith(("s", "t"))
+            if ok:
+                w = s
+            break
+
+    
+    if w.endswith("e"):
+        s = w[:-1]
+        m = _measure(s)
+        if m > 1 or (m == 1 and not _cvc(s)):
+            w = s
+    
+    if _measure(w) > 1 and _ends_double_cons(w) and w.endswith("l"):
+        w = w[:-1]
+    return w
+
+
+
+def process(text):
+    terms = []
+    for tok in tokenize(text):
+        n = normalize(tok)
+        if n in STOP_WORDS:  
+            continue
+        terms.append(n if "-" in n else stem(n))  
+    return terms  
+
+
+
+def evaluate(name, output, gold):
+    o, g = set(output), set(gold)
+    inter = o & g
+    precision = len(inter) / len(o) if o else 0
+    recall = len(inter) / len(g) if g else 0
+    print(f"[{name}] Precision = {precision:.2f} | Recall = {recall:.2f}")
+    print(f"   Extra  (O - G): {sorted(o - g)}")
+    print(f"   Missed (G - O): {sorted(g - o)}")
+    return precision, recall
+
+
+
+def main():
+   
+    if len(sys.argv) > 1:
+        with open(sys.argv[1], encoding="utf-8") as f:
+            lines = [ln.strip() for ln in f if ln.strip()]
+        texts = {f"text{i}": ln for i, ln in enumerate(lines, 1)}
+    else:
+        texts = {
+            "text1": "Friends, Romans, countrymen, lend me your ears;",
+            "text2": "John's new U.S.A. laptop is a state-of-the-art device. "
+                     "The price is high, but the quality is amazing!",
+            "text3": "The authorization for this authorized project is pending. "
+                     "He authorizes the payments regularly.",
+        }
+
+    
+    gold = {
+        "text1": ["friend", "roman", "countrymen", "lend", "ear"],
+        "text2": ["john", "new", "usa", "laptop", "state-of-the-art",
+                  "devic", "price", "high", "qualiti", "amaz"],
+        "text3": ["author", "author", "project", "pend",
+                  "author", "payment", "regularli"],
+    }
+
+    results = {name: process(text) for name, text in texts.items()}
+
+    print("===== Processed terms =====")
+    for name, terms in results.items():
+        print(f"{name}: {terms}")
+
+    with open("outputs.json", "w", encoding="utf-8") as f:
+        json.dump(results, f, ensure_ascii=False, indent=2)
+
+    print("\n===== Precision / Recall =====")
+    for name, terms in results.items():
+        evaluate(name, terms, gold.get(name, []))
+
+
+if __name__ == "__main__":
+    main()
